@@ -19,7 +19,6 @@
 
         .floating-btn { position: absolute; z-index: 20; padding: 12px 20px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.5); transition: background 0.3s; }
         
-        /* 書き出しボタン（左上） */
         .top-left { top: 20px; left: 20px; background-color: #2196F3; color: white; border-radius: 25px; display: none; }
         .top-left:hover { background-color: #1976D2; }
         .top-left:disabled { background-color: #555; cursor: not-allowed; }
@@ -59,7 +58,7 @@
 
         <div id="loading" class="loading">AIモデルを読み込み中...</div>
         
-        <video id="analytical_video" playsinline muted></video>
+        <video id="analytical_video" playsinline muted crossorigin="anonymous"></video>
         <canvas id="output_canvas"></canvas>
         
         <button id="export_video_btn" class="floating-btn top-left">⬇ トラッキング保存</button>
@@ -135,7 +134,9 @@
 
         const video = document.getElementById("analytical_video");
         const canvasElement = document.getElementById("output_canvas");
-        const canvasCtx = canvasElement.getContext("2d");
+        // 【修正1】 スマホで動画が真っ黒になるバグを防ぐため、メモリを頻繁に読み書きする設定を有効化
+        const canvasCtx = canvasElement.getContext("2d", { willReadFrequently: true });
+        
         const loadingDiv = document.getElementById("loading");
         const fileOverlay = document.getElementById("file_overlay");
         const fileInput = document.getElementById("video_file_input");
@@ -164,12 +165,11 @@
         let isMirrored = false;
         const FRAME_TIME = 1 / 30;
 
-        // 書き出し用変数
         let isExporting = false;
-        let isPrecalculating = false; // AI事前計算中フラグ
+        let isPrecalculating = false;
         let exportRecorder = null;
         let exportChunks = [];
-        let exportLandmarksData = []; // 全フレームの計算結果を保持
+        let exportLandmarksData = [];
 
         let currentCategory = "others";
         let currentMode = "all";
@@ -222,8 +222,7 @@
                 changeVideoBtn.style.display = "block";
                 exportVideoBtn.style.display = "block";
                 
-                canvasElement.width = video.videoWidth;
-                canvasElement.height = video.videoHeight;
+                checkAndResizeCanvas(); // 最初の読み込み時に1回だけサイズを設定する
                 
                 seekbar.max = video.duration;
                 timeDuration.innerText = formatTime(video.duration);
@@ -238,7 +237,6 @@
         });
         
         video.addEventListener("timeupdate", () => {
-            // 通常再生時は毎フレーム解析、ただし書き出し中(2段階目)は無視する
             if (!video.paused && !isExporting) {
                 seekbar.value = video.currentTime;
                 timeCurrent.innerText = formatTime(video.currentTime);
@@ -253,7 +251,6 @@
             btnPlayPause.innerText = "▶ 再生";
             btnPlayPause.style.backgroundColor = "#4CAF50";
 
-            // 滑らか録画の終了処理
             if (isExporting && !isPrecalculating && exportRecorder && exportRecorder.state !== "inactive") {
                 exportRecorder.stop();
             }
@@ -264,6 +261,23 @@
             const mins = Math.floor(seconds / 60);
             const secs = Math.floor(seconds % 60);
             return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+        }
+
+        function checkAndResizeCanvas() {
+            const MAX_DIMENSION = 1280; 
+            let w = video.videoWidth;
+            let h = video.videoHeight;
+            
+            if (w > MAX_DIMENSION || h > MAX_DIMENSION) {
+                const ratio = Math.min(MAX_DIMENSION / w, MAX_DIMENSION / h);
+                w = Math.round(w * ratio);
+                h = Math.round(h * ratio);
+            }
+            
+            if (canvasElement.width !== w) {
+                canvasElement.width = w;
+                canvasElement.height = h;
+            }
         }
 
         function calculateAngle(p1, p2, p3) {
@@ -307,8 +321,8 @@
             }
         }
 
-        // 引数で渡された骨格データ(配列)をもとにCanvasへ描画する独立した関数
         function renderFrameWithData(landmarksArray) {
+            // 【修正2】 録画中にCanvasサイズが変動してストリームが死ぬのを防ぐため、サイズチェックはここでは行わない
             canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
             canvasCtx.save();
             
@@ -343,20 +357,12 @@
             canvasCtx.restore();
         }
 
-        // 通常の再生・シーク時に呼ばれる処理（その場でAI計算＋描画）
         function processFrame() {
             if (!poseLandmarker || video.readyState < 2) return;
-
-            if (canvasElement.width !== video.videoWidth) {
-                canvasElement.width = video.videoWidth;
-                canvasElement.height = video.videoHeight;
-            }
-
             const results = poseLandmarker.detect(video);
             renderFrameWithData(results.landmarks);
         }
 
-        // 通常再生時のループ
         function playLoop() {
             if (isPlaying && !video.paused) {
                 if (!isExporting) {
@@ -366,13 +372,21 @@
             }
         }
 
-
         // ==========================================
-        // 書き出し機能（カクつきをなくすための2段階処理）
+        // 書き出し機能（真っ黒バグとメモリ枯渇の解消）
         // ==========================================
         exportVideoBtn.addEventListener("click", () => {
             if (isExporting) return;
             
+            video.play().then(() => {
+                video.pause();
+                startExportProcess();
+            }).catch(e => {
+                startExportProcess();
+            });
+        });
+
+        function startExportProcess() {
             isExporting = true;
             isPrecalculating = true;
             exportChunks = [];
@@ -390,41 +404,34 @@
 
             video.currentTime = 0;
             video.addEventListener('seeked', processExportFrame);
-        });
+        }
 
-        // ステップ1: AIの事前計算（動画を1コマずつ進めて骨格だけ記憶する）
         function processExportFrame() {
             if (!isPrecalculating) return;
 
-            // UIのプログレスバーを更新
             seekbar.value = video.currentTime;
             timeCurrent.innerText = formatTime(video.currentTime);
             const progress = Math.min(100, Math.round((video.currentTime / video.duration) * 100));
             const progressEl = document.getElementById('export_progress');
             if(progressEl) progressEl.innerText = `${progress}%`;
 
-            // AI計算とデータ保存
             const results = poseLandmarker.detect(video);
             exportLandmarksData.push({
                 time: video.currentTime,
                 landmarks: results.landmarks && results.landmarks.length > 0 ? JSON.parse(JSON.stringify(results.landmarks)) : []
             });
 
-            // ユーザーに進捗を見せるために画面にも描画
             renderFrameWithData(exportLandmarksData[exportLandmarksData.length - 1].landmarks);
 
-            // 次のコマへ進める
             const nextTime = video.currentTime + FRAME_TIME;
             if (nextTime < video.duration) {
                 setTimeout(() => { video.currentTime = nextTime; }, 0);
             } else {
-                // 最後まで計算完了！ステップ2へ進む
                 video.removeEventListener('seeked', processExportFrame);
                 startRecordingStep();
             }
         }
 
-        // ステップ2: 滑らかな録画（計算済みの骨格データを呼び出して描画しながら録画する）
         function startRecordingStep() {
             isPrecalculating = false;
             exportVideoBtn.innerText = "⏳ 2/2: 動画作成中...";
@@ -434,12 +441,21 @@
 
             video.addEventListener('seeked', function startExport() {
                 video.removeEventListener('seeked', startExport); 
+                
+                renderFrameWithData(exportLandmarksData[0] ? exportLandmarksData[0].landmarks : []);
 
                 const stream = canvasElement.captureStream(30); 
-                let options = { mimeType: 'video/webm' };
-                if (!MediaRecorder.isTypeSupported('video/webm')) {
+                
+                // 【修正3】 スマホのChrome等で最も安定して録画できるコーデック(VP8)を最優先にする
+                let options = {};
+                if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
+                    options = { mimeType: 'video/webm;codecs=vp8' };
+                } else if (MediaRecorder.isTypeSupported('video/webm')) {
+                    options = { mimeType: 'video/webm' };
+                } else if (MediaRecorder.isTypeSupported('video/mp4')) {
                     options = { mimeType: 'video/mp4' }; 
                 }
+
                 exportRecorder = new MediaRecorder(stream, options);
 
                 exportRecorder.ondataavailable = e => {
@@ -447,7 +463,6 @@
                 };
 
                 exportRecorder.onstop = () => {
-                    // ダウンロードとUIのリセット
                     isExporting = false;
                     controlPanel.style.opacity = "1";
                     exportVideoBtn.innerText = "⬇ トラッキング保存";
@@ -455,35 +470,34 @@
                     changeVideoBtn.style.display = "block";
                     loadingDiv.style.display = "none";
                     
-                    const blob = new Blob(exportChunks, { type: options.mimeType });
+                    const mime = options.mimeType || 'video/webm';
+                    const blob = new Blob(exportChunks, { type: mime });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
                     const date = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
-                    a.download = `pe-analysis-heavy-smooth-${date}.${options.mimeType === 'video/mp4' ? 'mp4' : 'webm'}`;
+                    a.download = `pe-analysis-heavy-${date}.${mime.includes('mp4') ? 'mp4' : 'webm'}`;
                     a.click();
                     URL.revokeObjectURL(url);
                 };
 
-                // 録画と再生を同時にスタート
-                exportRecorder.start();
+                // 【修正4】 メモリ不足を防ぐため、データを最後まで溜め込まず、0.2秒(200ms)ごとに細かく保存処理させる
+                exportRecorder.start(200);
+                
+                video.addEventListener('play', function onPlay() {
+                    video.removeEventListener('play', onPlay);
+                    isPlaying = true;
+                    playRecordingLoop();
+                });
+                
                 video.play();
-                isPlaying = true;
-                playRecordingLoop();
 
             }, { once: true });
         }
 
-        // 録画中専用の描画ループ（AI計算をスキップし、時間に応じた計算済みデータを描画）
         function playRecordingLoop() {
             if (!isExporting || isPrecalculating) return;
 
-            if (canvasElement.width !== video.videoWidth) {
-                canvasElement.width = video.videoWidth;
-                canvasElement.height = video.videoHeight;
-            }
-
-            // 現在の動画の再生時間に最も近いデータを事前計算配列から探す
             let closestData = [];
             let minDiff = Infinity;
             for (let i = 0; i < exportLandmarksData.length; i++) {
