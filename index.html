@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>体育授業用 動画フォーム分析ツール (Heavyモデル版)</title>
+    <style>
+        body { font-family: 'Helvetica Neue', Arial, sans-serif; margin: 0; padding: 0; background-color: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; color: white; }
+        .container { position: relative; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+        video, canvas { position: absolute; max-width: 100%; max-height: 100%; object-fit: contain; }
+        .mirrored { transform: scaleX(-1); }
+        canvas { z-index: 2; pointer-events: none; }
+        
+        .file-overlay { position: absolute; z-index: 30; background: rgba(20, 20, 20, 0.9); padding: 40px; border-radius: 20px; border: 2px dashed #555; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+        .file-input-btn { background-color: #4CAF50; color: white; padding: 15px 30px; font-size: 18px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; margin-top: 15px; transition: background 0.2s; }
+        .file-input-btn:hover { background-color: #45a049; }
+
+        .loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; z-index: 31; background: rgba(0,0,0,0.8); padding: 15px 30px; border-radius: 30px; border: 1px solid #555; display: none; text-align: center; line-height: 1.5; }
+
+        .floating-btn { position: absolute; z-index: 20; padding: 12px 20px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.5); transition: background 0.3s; }
+        
+        /* 書き出しボタン（左上） */
+        .top-left { top: 20px; left: 20px; background-color: #2196F3; color: white; border-radius: 25px; display: none; }
+        .top-left:hover { background-color: #1976D2; }
+        .top-left:disabled { background-color: #555; cursor: not-allowed; }
+
+        .top-right { top: 20px; right: 20px; background-color: #444; color: white; border-radius: 25px; display: none; }
+        .top-right:hover { background-color: #555; }
+
+        .control-panel { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 20; background: rgba(30, 30, 30, 0.95); padding: 15px 25px; border-radius: 20px; display: none; flex-direction: column; gap: 12px; width: 80%; max-width: 600px; box-shadow: 0 4px 15px rgba(0,0,0,0.6); border: 1px solid #555; transition: opacity 0.3s; }
+        .seekbar-container { display: flex; align-items: center; gap: 10px; width: 100%; }
+        .seekbar { flex-grow: 1; cursor: pointer; height: 8px; }
+        .time-display { font-size: 14px; font-family: monospace; min-width: 45px; text-align: center; }
+        .button-row { display: flex; justify-content: center; gap: 15px; align-items: center; }
+        .playback-btn { background: #444; border: none; color: white; font-size: 15px; font-weight: bold; cursor: pointer; padding: 8px 16px; border-radius: 20px; transition: background 0.2s; }
+        .playback-btn:hover { background: #555; }
+        .playback-btn:disabled { color: #888; background: #333; cursor: not-allowed; }
+        #btn_play_pause { background: #4CAF50; }
+        #btn_play_pause:hover { background: #45a049; }
+
+        .sidebar { position: absolute; top: 0; right: -320px; width: 320px; height: 100%; background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(8px); transition: right 0.3s ease; z-index: 15; box-sizing: border-box; padding: 90px 20px 30px 20px; display: flex; flex-direction: column; gap: 25px; border-left: 1px solid #444; }
+        .sidebar.open { right: 0; }
+        .sidebar-toggle { position: absolute; top: 50%; left: -45px; width: 45px; height: 100px; background: rgba(30, 30, 30, 0.95); border-left: 1px solid #444; border-top: 1px solid #444; border-bottom: 1px solid #444; display: flex; justify-content: center; align-items: center; cursor: pointer; border-radius: 12px 0 0 12px; transform: translateY(-50%); font-size: 20px; }
+        .form-group { display: flex; flex-direction: column; gap: 8px; }
+        .form-group label { font-size: 13px; color: #aaa; font-weight: bold; }
+        .mode-select { padding: 12px; font-size: 15px; border-radius: 6px; border: 1px solid #555; background-color: #222; color: white; cursor: pointer; width: 100%; }
+        .instruction-box { background: rgba(0, 0, 0, 0.5); padding: 15px; border-radius: 8px; font-size: 14px; line-height: 1.5; color: #ddd; border: 1px solid #444; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+
+    <div class="container" id="app_container">
+        <div id="file_overlay" class="file-overlay">
+            <h2 style="margin-top:0;">動画フォーム分析ツール (Heavy)</h2>
+            <p style="color:#aaa; font-size:14px;">最高精度モデルを使用します。PC等での利用を推奨します。</p>
+            <input type="file" id="video_file_input" accept="video/*" style="display:none;">
+            <button class="file-input-btn" onclick="document.getElementById('video_file_input').click()">動画ファイルを選択</button>
+        </div>
+
+        <div id="loading" class="loading">AIモデルを読み込み中...</div>
+        
+        <video id="analytical_video" playsinline muted></video>
+        <canvas id="output_canvas"></canvas>
+        
+        <button id="export_video_btn" class="floating-btn top-left">⬇ トラッキング保存</button>
+
+        <button id="change_video_btn" class="floating-btn top-right" onclick="document.getElementById('video_file_input').click()">🔄 動画を変更</button>
+
+        <div id="control_panel" class="control-panel">
+            <div class="seekbar-container">
+                <span id="time_current" class="time-display">0:00</span>
+                <input type="range" id="seekbar" class="seekbar" min="0" max="100" value="0" step="0.01">
+                <span id="time_duration" class="time-display">0:00</span>
+            </div>
+            <div class="button-row">
+                <button id="btn_frame_prev" class="playback-btn">◀ コマ戻し</button>
+                <button id="btn_play_pause" class="playback-btn">▶ 再生</button>
+                <button id="btn_frame_next" class="playback-btn">コマ送り ▶</button>
+            </div>
+        </div>
+
+        <div class="sidebar" id="sidebar">
+            <div class="sidebar-toggle" id="sidebar_toggle"><span id="toggle_icon">◀</span></div>
+            <h3 style="margin: 0; border-bottom: 1px solid #555; padding-bottom: 10px;">分析設定</h3>
+            <div class="form-group">
+                <label>画面表示設定</label>
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; color: white; font-size: 15px;">
+                    <input type="checkbox" id="mirror_toggle" style="width: 18px; height: 18px;">
+                    左右反転（鏡面表示）
+                </label>
+            </div>
+            <div class="form-group">
+                <label>スポーツのカテゴリ</label>
+                <select id="category_select" class="mode-select">
+                    <option value="others">器械運動・陸上・武道・ダンス</option>
+                    <option value="ball">球技</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>トラッキング種目</label>
+                <select id="mode_select" class="mode-select"></select>
+            </div>
+            <div id="instruction" class="instruction-box">動画を読み込むと分析が始まります。</div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { PoseLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8";
+
+        const sportsData = {
+            "others": [
+                { id: "all", name: "総合 (全身)", desc: "全身の動きを不透明度100%でトラッキングします。", highlights: [] },
+                { id: "mat", name: "マット運動", desc: "【マット運動】\n腰回りの角度に注目し、体の丸まり具合を確認します。", highlights: [{p1:11, p2:23, p3:25, color:"#FF5722", label:"腰の丸み"}] },
+                { id: "vault", name: "跳び箱", desc: "【跳び箱】\n腕の突っ張りと踏み切り姿勢を確認します。", highlights: [{p1:11, p2:13, p3:15, color:"#2196F3", label:"左腕"}, {p1:12, p2:14, p3:16, color:"#2196F3", label:"右腕"}] },
+                { id: "bar", name: "鉄棒 (逆上がり)", desc: "【鉄棒】\n腕の引きつけとお腹と鉄棒の距離を確認します。", highlights: [{p1:11, p2:13, p3:15, color:"#E91E63", label:"左肘"}, {p1:12, p2:14, p3:16, color:"#E91E63", label:"右肘"}] },
+                { id: "sprint", name: "短距離走・リレー", desc: "【短距離走】\n腕の振りと股関節の上がり具合を確認します。", highlights: [{p1:11, p2:23, p3:25, color:"#00BCD4", label:"左もも"}, {p1:12, p2:24, p3:26, color:"#00BCD4", label:"右もも"}] },
+                { id: "long_run", name: "長距離走", desc: "【長距離走】\nリラックスした姿勢と体幹の軸を確認します。", highlights: [{p1:0, p2:11, p3:23, color:"#8BC34A", label:"体幹軸(左)"}, {p1:0, p2:12, p3:24, color:"#8BC34A", label:"体幹軸(右)"}] },
+                { id: "hurdle", name: "ハードル走", desc: "【ハードル】\n振り上げ脚の真っ直ぐな伸びと抜き脚を確認します。", highlights: [{p1:23, p2:25, p3:27, color:"#FFC107", label:"左膝"}, {p1:24, p2:26, p3:28, color:"#FFC107", label:"右膝"}] },
+                { id: "jump", name: "走り幅跳び・高跳び", desc: "【跳躍】\n踏み切り脚の力強い伸びと空中姿勢を確認します。", highlights: [{p1:23, p2:25, p3:27, color:"#4CAF50", label:"左脚"}, {p1:24, p2:26, p3:28, color:"#4CAF50", label:"右脚"}] },
+                { id: "judo", name: "柔道", desc: "【柔道】\n常に重心を低く保つ姿勢（両膝のタメ）を確認します。", highlights: [{p1:23, p2:25, p3:27, color:"#FF9800", label:"左膝"}, {p1:24, p2:26, p3:28, color:"#FF9800", label:"右膝"}] },
+                { id: "kendo", name: "剣道", desc: "【剣道】\n打突時の右手の伸びと右足の踏み込みを確認します。", highlights: [{p1:12, p2:14, p3:16, color:"#F44336", label:"右腕"}, {p1:24, p2:26, p3:28, color:"#F44336", label:"右脚"}] },
+                { id: "sumo", name: "相撲", desc: "【相撲】\n立ち合い時の重心の低さと前傾姿勢を確認します。", highlights: [{p1:11, p2:23, p3:25, color:"#795548", label:"左腰(重心)"}, {p1:12, p2:24, p3:26, color:"#795548", label:"右腰(重心)"}] }
+            ],
+            "ball": [
+                { id: "basket", name: "バスケ (シュート)", desc: "【バスケ】\nシュート時の右膝のタメと右肘の伸びを確認します。", highlights: [{p1:12, p2:14, p3:16, color:"#9C27B0", label:"右肘"}, {p1:24, p2:26, p3:28, color:"#4CAF50", label:"右膝"}] },
+                { id: "soccer", name: "サッカー (キック)", desc: "【サッカー】\nキック時の軸足の安定と蹴り脚の振りかぶりを確認します。", highlights: [{p1:23, p2:25, p3:27, color:"#009688", label:"左脚"}, {p1:24, p2:26, p3:28, color:"#009688", label:"右脚"}] },
+                { id: "handball", name: "ハンドボール (投球)", desc: "【ハンド】\nジャンプシュート時の体の反りと腕の振りを確認します。", highlights: [{p1:12, p2:14, p3:16, color:"#E91E63", label:"右肘"}] },
+                { id: "volley_receive", name: "バレー (レシーブ)", desc: "【バレー】\nレシーブ時の重心の低さ(両膝の角度)を確認します。", highlights: [{p1:23, p2:25, p3:27, color:"#3F51B5", label:"左膝"}, {p1:24, p2:26, p3:28, color:"#3F51B5", label:"右膝"}] },
+                { id: "volley_spike", name: "バレー (スパイク)", desc: "【バレー】\nスパイク時の腕の引きと高い打点を確認します。", highlights: [{p1:12, p2:14, p3:16, color:"#F44336", label:"右腕"}] },
+                { id: "racket", name: "卓球/バド/テニス", desc: "【ラケット競技】\nスイング時の腕の角度と踏み込み足を確認します。", highlights: [{p1:12, p2:14, p3:16, color:"#FF5722", label:"右腕スイング"}] },
+                { id: "soft_pitch", name: "ソフトボール (投球)", desc: "【ソフト投球】\n投球腕のしなりと角度を確認します。", highlights: [{p1:12, p2:14, p3:16, color:"#673AB7", label:"右腕"}] },
+                { id: "soft_bat", name: "ソフトボール (打撃)", desc: "【ソフト打撃】\nバッティングフォームの腰の回転と肘のたたみを確認します。", highlights: [{p1:11, p2:13, p3:15, color:"#00BCD4", label:"左肘"}, {p1:12, p2:14, p3:16, color:"#00BCD4", label:"右肘"}] }
+            ]
+        };
+
+        const video = document.getElementById("analytical_video");
+        const canvasElement = document.getElementById("output_canvas");
+        const canvasCtx = canvasElement.getContext("2d");
+        const loadingDiv = document.getElementById("loading");
+        const fileOverlay = document.getElementById("file_overlay");
+        const fileInput = document.getElementById("video_file_input");
+        
+        const controlPanel = document.getElementById("control_panel");
+        const exportVideoBtn = document.getElementById("export_video_btn");
+        const changeVideoBtn = document.getElementById("change_video_btn");
+        const instructionDiv = document.getElementById("instruction");
+
+        const sidebar = document.getElementById("sidebar");
+        const sidebarToggle = document.getElementById("sidebar_toggle");
+        const toggleIcon = document.getElementById("toggle_icon");
+        const categorySelect = document.getElementById("category_select");
+        const modeSelect = document.getElementById("mode_select");
+        const mirrorToggle = document.getElementById("mirror_toggle");
+
+        const seekbar = document.getElementById("seekbar");
+        const timeCurrent = document.getElementById("time_current");
+        const timeDuration = document.getElementById("time_duration");
+        const btnPlayPause = document.getElementById("btn_play_pause");
+        const btnFramePrev = document.getElementById("btn_frame_prev");
+        const btnFrameNext = document.getElementById("btn_frame_next");
+
+        let poseLandmarker = undefined;
+        let isPlaying = false;
+        let isMirrored = false;
+        const FRAME_TIME = 1 / 30;
+
+        let currentCategory = "others";
+        let currentMode = "all";
+        let currentSportConfig = sportsData["others"][0];
+
+        // 書き出し用変数
+        let isExporting = false;
+        let exportRecorder = null;
+        let exportChunks = [];
+
+        function updateModeSelect() {
+            modeSelect.innerHTML = "";
+            sportsData[currentCategory].forEach(sport => {
+                const option = document.createElement("option");
+                option.value = sport.id;
+                option.innerText = sport.name;
+                modeSelect.appendChild(option);
+            });
+            currentMode = sportsData[currentCategory][0].id;
+            currentSportConfig = sportsData[currentCategory][0];
+            if(video.src) instructionDiv.innerText = currentSportConfig.desc;
+        }
+        updateModeSelect();
+
+        async function initPoseLandmarker() {
+            loadingDiv.style.display = "block";
+            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm");
+            poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+                baseOptions: { 
+                    // 最高精度版（Heavy）モデルを使用するように変更
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task`, 
+                    delegate: "CPU" 
+                },
+                runningMode: "IMAGE",
+                numPoses: 2 // 複数人(最大2人)を検出するように設定
+            });
+            loadingDiv.style.display = "none";
+        }
+        initPoseLandmarker();
+
+        fileInput.addEventListener("change", (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            loadingDiv.style.display = "block";
+            loadingDiv.innerText = "動画を読み込み中...";
+
+            const fileURL = URL.createObjectURL(file);
+            video.src = fileURL;
+            video.load();
+
+            video.onloadedmetadata = () => {
+                loadingDiv.style.display = "none";
+                fileOverlay.style.display = "none";
+                controlPanel.style.display = "flex";
+                changeVideoBtn.style.display = "block";
+                exportVideoBtn.style.display = "block";
+                
+                canvasElement.width = video.videoWidth;
+                canvasElement.height = video.videoHeight;
+                
+                seekbar.max = video.duration;
+                timeDuration.innerText = formatTime(video.duration);
+                instructionDiv.innerText = currentSportConfig.desc;
+
+                setTimeout(() => { video.currentTime = 0.001; }, 100);
+            };
+        });
+
+        video.addEventListener("seeked", () => {
+            if (!isExporting) processFrame();
+        });
+        
+        video.addEventListener("timeupdate", () => {
+            if (!video.paused) {
+                seekbar.value = video.currentTime;
+                timeCurrent.innerText = formatTime(video.currentTime);
+                processFrame();
+            }
+        });
+
+        // 録画完了時の処理
+        video.addEventListener("ended", () => {
+            isPlaying = false;
+            btnPlayPause.innerText = "▶ 再生";
+            btnPlayPause.style.backgroundColor = "#4CAF50";
+
+            if (isExporting && exportRecorder && exportRecorder.state !== "inactive") {
+                exportRecorder.stop();
+            }
+        });
+
+        function formatTime(seconds) {
+            if (isNaN(seconds)) return "0:00";
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+        }
+
+        function calculateAngle(p1, p2, p3) {
+            const radians = Math.atan2(p3.y - p2.y, p3.x - p2.x) - Math.atan2(p1.y - p2.y, p1.x - p2.x);
+            let angle = Math.abs((radians * 180.0) / Math.PI);
+            if (angle > 180.0) angle = 360 - angle;
+            return angle;
+        }
+
+        function drawHighlight(landmarks, p1Idx, p2Idx, p3Idx, color, labelText, lineWidth) {
+            const p1 = landmarks[p1Idx];
+            const p2 = landmarks[p2Idx];
+            const p3 = landmarks[p3Idx];
+            
+            if(p1 && p2 && p3 && p1.visibility > 0.2 && p2.visibility > 0.2 && p3.visibility > 0.2) {
+                canvasCtx.save();
+                canvasCtx.globalAlpha = 1.0; 
+                
+                canvasCtx.beginPath();
+                canvasCtx.moveTo(p1.x * canvasElement.width, p1.y * canvasElement.height);
+                canvasCtx.lineTo(p2.x * canvasElement.width, p2.y * canvasElement.height);
+                canvasCtx.lineTo(p3.x * canvasElement.width, p3.y * canvasElement.height);
+                canvasCtx.strokeStyle = color;
+                canvasCtx.lineWidth = lineWidth; // 人数によって動的に太さを変更
+                canvasCtx.lineJoin = "round";
+                canvasCtx.lineCap = "round";
+                canvasCtx.stroke();
+
+                const angle = calculateAngle(p1, p2, p3);
+                canvasCtx.translate(p2.x * canvasElement.width, p2.y * canvasElement.height);
+                
+                if (isMirrored) canvasCtx.scale(-1, 1);
+                
+                canvasCtx.fillStyle = "rgba(0, 0, 0, 1.0)";
+                canvasCtx.fillRect(15, -45, 180, 50); 
+                
+                canvasCtx.font = "bold 30px Arial"; 
+                canvasCtx.fillStyle = color;
+                canvasCtx.fillText(`${labelText}: ${Math.round(angle)}°`, 25, -10);
+                canvasCtx.restore();
+            }
+        }
+
+        function processFrame() {
+            if (!poseLandmarker || video.readyState < 2) return;
+
+            if (canvasElement.width !== video.videoWidth) {
+                canvasElement.width = video.videoWidth;
+                canvasElement.height = video.videoHeight;
+            }
+
+            const results = poseLandmarker.detect(video);
+
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.save();
+            
+            if (isMirrored) {
+                canvasCtx.translate(canvasElement.width, 0);
+                canvasCtx.scale(-1, 1);
+            }
+            
+            // 背景に動画を描画
+            canvasCtx.drawImage(video, 0, 0, canvasElement.width, canvasElement.height);
+            
+            if (results.landmarks && results.landmarks.length > 0) {
+                // 検出された人数を取得し、2人以上なら線を20に、1人なら300に設定
+                const detectedCount = results.landmarks.length;
+                const highlightLineWidth = detectedCount > 1 ? 20 : 300;
+
+                // 検出されたすべての人に対して描画処理をループ実行
+                for (const landmarks of results.landmarks) {
+                    const drawingUtils = new DrawingUtils(canvasCtx);
+                    
+                    if (currentSportConfig && currentSportConfig.highlights) {
+                        currentSportConfig.highlights.forEach(h => {
+                            drawHighlight(landmarks, h.p1, h.p2, h.p3, h.color, h.label, highlightLineWidth);
+                        });
+                    }
+                    
+                    canvasCtx.globalAlpha = 1.0;
+                    drawingUtils.drawConnectors(
+                        landmarks, PoseLandmarker.POSE_CONNECTIONS,
+                        { color: "rgba(255, 255, 255, 1.0)", lineWidth: 3 }
+                    );
+                    drawingUtils.drawLandmarks(landmarks, { color: "rgba(255, 215, 0, 1.0)", lineWidth: 2, radius: 4 });
+                }
+            }
+            canvasCtx.restore();
+        }
+
+        function playLoop() {
+            if (isPlaying && !video.paused) {
+                processFrame();
+                requestAnimationFrame(playLoop);
+            }
+        }
+
+        // --- コントロールUI 操作 ---
+        btnPlayPause.addEventListener("click", () => {
+            if (isExporting) return; // 書き出し中は操作不可
+            if (video.paused) {
+                video.play();
+                isPlaying = true;
+                btnPlayPause.innerText = "|| 一時停止";
+                btnPlayPause.style.backgroundColor = "#d9534f";
+                playLoop();
+            } else {
+                video.pause();
+                isPlaying = false;
+                btnPlayPause.innerText = "▶ 再生";
+                btnPlayPause.style.backgroundColor = "#4CAF50";
+            }
+        });
+
+        btnFramePrev.addEventListener("click", () => {
+            if (isExporting) return;
+            if (!video.paused) video.pause();
+            isPlaying = false;
+            btnPlayPause.innerText = "▶ 再生";
+            btnPlayPause.style.backgroundColor = "#4CAF50";
+            video.currentTime = Math.max(0, video.currentTime - FRAME_TIME);
+        });
+
+        btnFrameNext.addEventListener("click", () => {
+            if (isExporting) return;
+            if (!video.paused) video.pause();
+            isPlaying = false;
+            btnPlayPause.innerText = "▶ 再生";
+            btnPlayPause.style.backgroundColor = "#4CAF50";
+            video.currentTime = Math.min(video.duration, video.currentTime + FRAME_TIME);
+        });
+
+        seekbar.addEventListener("input", (e) => {
+            if (isExporting) return;
+            if (!video.paused) video.pause();
+            isPlaying = false;
+            btnPlayPause.innerText = "▶ 再生";
+            btnPlayPause.style.backgroundColor = "#4CAF50";
+            video.currentTime = e.target.value;
+        });
+
+        // --- 動画書き出し機能 ---
+        exportVideoBtn.addEventListener("click", () => {
+            if (isExporting) return;
+            
+            // 書き出し準備
+            isExporting = true;
+            exportChunks = [];
+            video.pause();
+            isPlaying = false;
+            
+            // UIの状態を「書き出し中」に変更
+            controlPanel.style.opacity = "0.3";
+            exportVideoBtn.innerText = "⏳ 書き出し中...";
+            exportVideoBtn.disabled = true;
+            changeVideoBtn.style.display = "none";
+            loadingDiv.style.display = "block";
+            loadingDiv.innerHTML = "トラッキング動画を作成中...<br><span style='font-size:14px;color:#aaa;'>(動画の長さと同じ時間がかかります。このままお待ちください)</span>";
+
+            // 動画を最初まで巻き戻す
+            video.currentTime = 0;
+
+            // 巻き戻し完了を待ってから録画スタート
+            video.addEventListener('seeked', function startExport() {
+                video.removeEventListener('seeked', startExport); // 1回だけ実行
+
+                const stream = canvasElement.captureStream(30); // 30fpsでキャプチャ
+                
+                // スマホ対応のため、録画コーデックはブラウザに任せる
+                let options = { mimeType: 'video/webm' };
+                if (!MediaRecorder.isTypeSupported('video/webm')) {
+                    options = { mimeType: 'video/mp4' }; // Safari用フォールバック
+                }
+                
+                exportRecorder = new MediaRecorder(stream, options);
+
+                exportRecorder.ondataavailable = e => {
+                    if (e.data.size > 0) exportChunks.push(e.data);
+                };
+
+                exportRecorder.onstop = () => {
+                    // 書き出し完了後の処理
+                    isExporting = false;
+                    controlPanel.style.opacity = "1";
+                    exportVideoBtn.innerText = "⬇ トラッキング保存";
+                    exportVideoBtn.disabled = false;
+                    changeVideoBtn.style.display = "block";
+                    loadingDiv.style.display = "none";
+                    btnPlayPause.innerText = "▶ 再生";
+                    btnPlayPause.style.backgroundColor = "#4CAF50";
+
+                    // ダウンロード処理
+                    const blob = new Blob(exportChunks, { type: options.mimeType });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    const date = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+                    a.download = `pe-analysis-heavy-${date}.${options.mimeType === 'video/mp4' ? 'mp4' : 'webm'}`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                };
+
+                // 再生と録画を開始
+                exportRecorder.start();
+                video.play();
+                isPlaying = true;
+                playLoop();
+
+            }, { once: true });
+        });
+
+        // --- サイドバー ---
+        sidebarToggle.addEventListener('click', () => {
+            sidebar.classList.toggle('open');
+            toggleIcon.innerText = sidebar.classList.contains('open') ? "▶" : "◀";
+        });
+
+        mirrorToggle.addEventListener('change', (e) => {
+            isMirrored = e.target.checked;
+            if (isMirrored) {
+                video.classList.add('mirrored');
+                canvasElement.classList.add('mirrored');
+            } else {
+                video.classList.remove('mirrored');
+                canvasElement.classList.remove('mirrored');
+            }
+            if(!isExporting) processFrame(); 
+        });
+
+        categorySelect.addEventListener('change', (e) => { currentCategory = e.target.value; updateModeSelect(); if(video.src && !isExporting) processFrame(); });
+        modeSelect.addEventListener('change', (e) => {
+            currentMode = e.target.value;
+            currentSportConfig = sportsData[currentCategory].find(s => s.id === currentMode);
+            instructionDiv.innerText = currentSportConfig.desc;
+            if(video.src && !isExporting) processFrame();
+        });
+    </script>
+</body>
+</html>
