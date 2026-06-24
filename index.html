@@ -164,14 +164,16 @@
         let isMirrored = false;
         const FRAME_TIME = 1 / 30;
 
+        // 書き出し用変数
+        let isExporting = false;
+        let isPrecalculating = false; // AI事前計算中フラグ
+        let exportRecorder = null;
+        let exportChunks = [];
+        let exportLandmarksData = []; // 全フレームの計算結果を保持
+
         let currentCategory = "others";
         let currentMode = "all";
         let currentSportConfig = sportsData["others"][0];
-
-        // 書き出し用変数
-        let isExporting = false;
-        let exportRecorder = null;
-        let exportChunks = [];
 
         function updateModeSelect() {
             modeSelect.innerHTML = "";
@@ -192,12 +194,11 @@
             const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm");
             poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
                 baseOptions: { 
-                    // 最高精度版（Heavy）モデルを使用するように変更
                     modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task`, 
                     delegate: "CPU" 
                 },
                 runningMode: "IMAGE",
-                numPoses: 2 // 複数人(最大2人)を検出するように設定
+                numPoses: 2 
             });
             loadingDiv.style.display = "none";
         }
@@ -237,20 +238,23 @@
         });
         
         video.addEventListener("timeupdate", () => {
-            if (!video.paused) {
+            // 通常再生時は毎フレーム解析、ただし書き出し中(2段階目)は無視する
+            if (!video.paused && !isExporting) {
                 seekbar.value = video.currentTime;
                 timeCurrent.innerText = formatTime(video.currentTime);
                 processFrame();
             }
         });
 
-        // 録画完了時の処理
         video.addEventListener("ended", () => {
+            if (isPrecalculating) return;
+
             isPlaying = false;
             btnPlayPause.innerText = "▶ 再生";
             btnPlayPause.style.backgroundColor = "#4CAF50";
 
-            if (isExporting && exportRecorder && exportRecorder.state !== "inactive") {
+            // 滑らか録画の終了処理
+            if (isExporting && !isPrecalculating && exportRecorder && exportRecorder.state !== "inactive") {
                 exportRecorder.stop();
             }
         });
@@ -283,7 +287,7 @@
                 canvasCtx.lineTo(p2.x * canvasElement.width, p2.y * canvasElement.height);
                 canvasCtx.lineTo(p3.x * canvasElement.width, p3.y * canvasElement.height);
                 canvasCtx.strokeStyle = color;
-                canvasCtx.lineWidth = lineWidth; // 人数によって動的に太さを変更
+                canvasCtx.lineWidth = lineWidth; 
                 canvasCtx.lineJoin = "round";
                 canvasCtx.lineCap = "round";
                 canvasCtx.stroke();
@@ -303,16 +307,8 @@
             }
         }
 
-        function processFrame() {
-            if (!poseLandmarker || video.readyState < 2) return;
-
-            if (canvasElement.width !== video.videoWidth) {
-                canvasElement.width = video.videoWidth;
-                canvasElement.height = video.videoHeight;
-            }
-
-            const results = poseLandmarker.detect(video);
-
+        // 引数で渡された骨格データ(配列)をもとにCanvasへ描画する独立した関数
+        function renderFrameWithData(landmarksArray) {
             canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
             canvasCtx.save();
             
@@ -321,16 +317,13 @@
                 canvasCtx.scale(-1, 1);
             }
             
-            // 背景に動画を描画
             canvasCtx.drawImage(video, 0, 0, canvasElement.width, canvasElement.height);
             
-            if (results.landmarks && results.landmarks.length > 0) {
-                // 検出された人数を取得し、2人以上なら線を20に、1人なら300に設定
-                const detectedCount = results.landmarks.length;
+            if (landmarksArray && landmarksArray.length > 0) {
+                const detectedCount = landmarksArray.length;
                 const highlightLineWidth = detectedCount > 1 ? 20 : 300;
 
-                // 検出されたすべての人に対して描画処理をループ実行
-                for (const landmarks of results.landmarks) {
+                for (const landmarks of landmarksArray) {
                     const drawingUtils = new DrawingUtils(canvasCtx);
                     
                     if (currentSportConfig && currentSportConfig.highlights) {
@@ -350,16 +343,169 @@
             canvasCtx.restore();
         }
 
+        // 通常の再生・シーク時に呼ばれる処理（その場でAI計算＋描画）
+        function processFrame() {
+            if (!poseLandmarker || video.readyState < 2) return;
+
+            if (canvasElement.width !== video.videoWidth) {
+                canvasElement.width = video.videoWidth;
+                canvasElement.height = video.videoHeight;
+            }
+
+            const results = poseLandmarker.detect(video);
+            renderFrameWithData(results.landmarks);
+        }
+
+        // 通常再生時のループ
         function playLoop() {
             if (isPlaying && !video.paused) {
-                processFrame();
+                if (!isExporting) {
+                    processFrame();
+                }
                 requestAnimationFrame(playLoop);
             }
         }
 
+
+        // ==========================================
+        // 書き出し機能（カクつきをなくすための2段階処理）
+        // ==========================================
+        exportVideoBtn.addEventListener("click", () => {
+            if (isExporting) return;
+            
+            isExporting = true;
+            isPrecalculating = true;
+            exportChunks = [];
+            exportLandmarksData = [];
+            video.pause();
+            isPlaying = false;
+            
+            controlPanel.style.opacity = "0.3";
+            exportVideoBtn.innerText = "⏳ 1/2: AI解析中...";
+            exportVideoBtn.disabled = true;
+            changeVideoBtn.style.display = "none";
+            
+            loadingDiv.style.display = "block";
+            loadingDiv.innerHTML = "トラッキングデータを事前解析中...<br><span style='font-size:14px;color:#aaa;'>(動画の長さによって数分かかります。そのままお待ちください)</span><br><span id='export_progress' style='font-size:28px; font-weight:bold; display:block; margin-top:15px; color:#4CAF50;'>0%</span>";
+
+            video.currentTime = 0;
+            video.addEventListener('seeked', processExportFrame);
+        });
+
+        // ステップ1: AIの事前計算（動画を1コマずつ進めて骨格だけ記憶する）
+        function processExportFrame() {
+            if (!isPrecalculating) return;
+
+            // UIのプログレスバーを更新
+            seekbar.value = video.currentTime;
+            timeCurrent.innerText = formatTime(video.currentTime);
+            const progress = Math.min(100, Math.round((video.currentTime / video.duration) * 100));
+            const progressEl = document.getElementById('export_progress');
+            if(progressEl) progressEl.innerText = `${progress}%`;
+
+            // AI計算とデータ保存
+            const results = poseLandmarker.detect(video);
+            exportLandmarksData.push({
+                time: video.currentTime,
+                landmarks: results.landmarks && results.landmarks.length > 0 ? JSON.parse(JSON.stringify(results.landmarks)) : []
+            });
+
+            // ユーザーに進捗を見せるために画面にも描画
+            renderFrameWithData(exportLandmarksData[exportLandmarksData.length - 1].landmarks);
+
+            // 次のコマへ進める
+            const nextTime = video.currentTime + FRAME_TIME;
+            if (nextTime < video.duration) {
+                setTimeout(() => { video.currentTime = nextTime; }, 0);
+            } else {
+                // 最後まで計算完了！ステップ2へ進む
+                video.removeEventListener('seeked', processExportFrame);
+                startRecordingStep();
+            }
+        }
+
+        // ステップ2: 滑らかな録画（計算済みの骨格データを呼び出して描画しながら録画する）
+        function startRecordingStep() {
+            isPrecalculating = false;
+            exportVideoBtn.innerText = "⏳ 2/2: 動画作成中...";
+            loadingDiv.innerHTML = "滑らかな動画を生成中...<br><span style='font-size:14px;color:#aaa;'>(動画と同じ時間だけかかります。このままお待ちください)</span>";
+
+            video.currentTime = 0;
+
+            video.addEventListener('seeked', function startExport() {
+                video.removeEventListener('seeked', startExport); 
+
+                const stream = canvasElement.captureStream(30); 
+                let options = { mimeType: 'video/webm' };
+                if (!MediaRecorder.isTypeSupported('video/webm')) {
+                    options = { mimeType: 'video/mp4' }; 
+                }
+                exportRecorder = new MediaRecorder(stream, options);
+
+                exportRecorder.ondataavailable = e => {
+                    if (e.data.size > 0) exportChunks.push(e.data);
+                };
+
+                exportRecorder.onstop = () => {
+                    // ダウンロードとUIのリセット
+                    isExporting = false;
+                    controlPanel.style.opacity = "1";
+                    exportVideoBtn.innerText = "⬇ トラッキング保存";
+                    exportVideoBtn.disabled = false;
+                    changeVideoBtn.style.display = "block";
+                    loadingDiv.style.display = "none";
+                    
+                    const blob = new Blob(exportChunks, { type: options.mimeType });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    const date = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+                    a.download = `pe-analysis-heavy-smooth-${date}.${options.mimeType === 'video/mp4' ? 'mp4' : 'webm'}`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                };
+
+                // 録画と再生を同時にスタート
+                exportRecorder.start();
+                video.play();
+                isPlaying = true;
+                playRecordingLoop();
+
+            }, { once: true });
+        }
+
+        // 録画中専用の描画ループ（AI計算をスキップし、時間に応じた計算済みデータを描画）
+        function playRecordingLoop() {
+            if (!isExporting || isPrecalculating) return;
+
+            if (canvasElement.width !== video.videoWidth) {
+                canvasElement.width = video.videoWidth;
+                canvasElement.height = video.videoHeight;
+            }
+
+            // 現在の動画の再生時間に最も近いデータを事前計算配列から探す
+            let closestData = [];
+            let minDiff = Infinity;
+            for (let i = 0; i < exportLandmarksData.length; i++) {
+                const diff = Math.abs(exportLandmarksData[i].time - video.currentTime);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    closestData = exportLandmarksData[i].landmarks;
+                }
+            }
+
+            renderFrameWithData(closestData);
+
+            if (!video.paused) {
+                requestAnimationFrame(playRecordingLoop);
+            }
+        }
+        // ==========================================
+
+
         // --- コントロールUI 操作 ---
         btnPlayPause.addEventListener("click", () => {
-            if (isExporting) return; // 書き出し中は操作不可
+            if (isExporting) return; 
             if (video.paused) {
                 video.play();
                 isPlaying = true;
@@ -399,76 +545,6 @@
             btnPlayPause.innerText = "▶ 再生";
             btnPlayPause.style.backgroundColor = "#4CAF50";
             video.currentTime = e.target.value;
-        });
-
-        // --- 動画書き出し機能 ---
-        exportVideoBtn.addEventListener("click", () => {
-            if (isExporting) return;
-            
-            // 書き出し準備
-            isExporting = true;
-            exportChunks = [];
-            video.pause();
-            isPlaying = false;
-            
-            // UIの状態を「書き出し中」に変更
-            controlPanel.style.opacity = "0.3";
-            exportVideoBtn.innerText = "⏳ 書き出し中...";
-            exportVideoBtn.disabled = true;
-            changeVideoBtn.style.display = "none";
-            loadingDiv.style.display = "block";
-            loadingDiv.innerHTML = "トラッキング動画を作成中...<br><span style='font-size:14px;color:#aaa;'>(動画の長さと同じ時間がかかります。このままお待ちください)</span>";
-
-            // 動画を最初まで巻き戻す
-            video.currentTime = 0;
-
-            // 巻き戻し完了を待ってから録画スタート
-            video.addEventListener('seeked', function startExport() {
-                video.removeEventListener('seeked', startExport); // 1回だけ実行
-
-                const stream = canvasElement.captureStream(30); // 30fpsでキャプチャ
-                
-                // スマホ対応のため、録画コーデックはブラウザに任せる
-                let options = { mimeType: 'video/webm' };
-                if (!MediaRecorder.isTypeSupported('video/webm')) {
-                    options = { mimeType: 'video/mp4' }; // Safari用フォールバック
-                }
-                
-                exportRecorder = new MediaRecorder(stream, options);
-
-                exportRecorder.ondataavailable = e => {
-                    if (e.data.size > 0) exportChunks.push(e.data);
-                };
-
-                exportRecorder.onstop = () => {
-                    // 書き出し完了後の処理
-                    isExporting = false;
-                    controlPanel.style.opacity = "1";
-                    exportVideoBtn.innerText = "⬇ トラッキング保存";
-                    exportVideoBtn.disabled = false;
-                    changeVideoBtn.style.display = "block";
-                    loadingDiv.style.display = "none";
-                    btnPlayPause.innerText = "▶ 再生";
-                    btnPlayPause.style.backgroundColor = "#4CAF50";
-
-                    // ダウンロード処理
-                    const blob = new Blob(exportChunks, { type: options.mimeType });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    const date = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
-                    a.download = `pe-analysis-heavy-${date}.${options.mimeType === 'video/mp4' ? 'mp4' : 'webm'}`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                };
-
-                // 再生と録画を開始
-                exportRecorder.start();
-                video.play();
-                isPlaying = true;
-                playLoop();
-
-            }, { once: true });
         });
 
         // --- サイドバー ---
